@@ -38,59 +38,6 @@ else:
 run_name = '{}_res_{}_hid_{}_exp_{}'.format(tpe, FLAGS.resolution, FLAGS.n_hidden, FLAGS.exp_init)
 
 
-# Smart initialize for versions < 0.12.0
-def initialize_all_variables(sess=None):
-    """Initializes all uninitialized variables in correct order. Initializers
-    are only run for uninitialized variables, so it's safe to run this multiple
-    times.
-    Args:
-        sess: session to use. Use default session if None.
-    """
-
-    from tensorflow.contrib import graph_editor as ge
-
-    def make_initializer(var):
-        def f():
-            return tf.assign(var, var.initial_value).op
-
-        return f
-
-    def make_noop():
-        return tf.no_op()
-
-    def make_safe_initializer(var):
-        """Returns initializer op that only runs for uninitialized ops."""
-        return tf.cond(
-            tf.is_variable_initialized(var),
-            make_noop,
-            make_initializer(var),
-            name="safe_init_" + var.op.name).op
-
-    if not sess:
-        sess = tf.get_default_session()
-    g = tf.get_default_graph()
-
-    safe_initializers = {}
-    for v in tf.global_variables():
-        safe_initializers[v.op.name] = make_safe_initializer(v)
-
-    # initializers access variable vaue through read-only value cached in
-    # <varname>/read, so add control dependency to trigger safe_initializer
-    # on read access
-    for v in tf.global_variables():
-        var_name = v.op.name
-        var_cache = g.get_operation_by_name(var_name + "/read")
-        ge.reroute.add_control_inputs(var_cache, [safe_initializers[var_name]])
-
-    sess.run(tf.group(*safe_initializers.values()))
-
-    # remove initializer dependencies to avoid slowing down future variable reads
-    for v in tf.global_variables():
-        var_name = v.op.name
-        var_cache = g.get_operation_by_name(var_name + "/read")
-        ge.reroute.remove_control_inputs(var_cache, [safe_initializers[var_name]])
-
-
 def gen_async_sin(async_sampling, resolution=None, batch_size=32, on_target_T=(5, 6), off_target_T=(1, 100), max_len=125, min_len=85):
 
     half_batch = int(batch_size / 2)
@@ -230,8 +177,6 @@ def main(_):
 
         print("Initializing variables...", )
         sess.run(init)
-        # for backward compatibility (v < 0.12.0) use the following line instead of the above
-        # initialize_all_variables(sess)
         print("DONE!")
 
         writer = tf.summary.FileWriter("phasedLSTM_run/{}".format(run_name), sess.graph)
@@ -251,11 +196,14 @@ def main(_):
                     FLAGS.min_length
                 )
 
-                res = sess.run([optimizer, cost, accuracy, grads, cost_summary, accuracy_summary, merged_grads],
-                               feed_dict={x: batch_xs,
-                                          y: batch_ys,
-                                          lens: leng
-                                          })
+                res = sess.run(
+                    [optimizer, cost, accuracy, grads, cost_summary, accuracy_summary, merged_grads],
+                    feed_dict={
+                        x: batch_xs,
+                        y: batch_ys,
+                        lens: leng}
+                )
+
                 writer.add_summary(res[6], step * FLAGS.b_per_epoch + i)
                 writer.add_summary(res[4], step * FLAGS.b_per_epoch + i)
                 writer.add_summary(res[5], step * FLAGS.b_per_epoch + i)
@@ -266,6 +214,7 @@ def main(_):
             # wipe initial_states before testing
             for i, _ in enumerate(initial_states):
                 initial_states[i] = None
+
             test_xs, test_ys, leng, _, _ = gen_async_sin(
                 FLAGS.async,
                 FLAGS.resolution,
@@ -275,17 +224,21 @@ def main(_):
                 FLAGS.max_length,
                 FLAGS.min_length
             )
-            loss_test, acc_test, summ_cost, summ_acc = sess.run([cost,
-                                                                 accuracy, cost_val_summary, accuracy_val_summary],
-                                                                feed_dict={x: test_xs,
-                                                                           y: test_ys,
-                                                                           lens: leng})
+
+            loss_test, acc_test, summ_cost, summ_acc = sess.run(
+                [cost, accuracy, cost_val_summary, accuracy_val_summary],
+                feed_dict={
+                    x: test_xs,
+                    y: test_ys,
+                    lens: leng}
+            )
+
             writer.add_summary(summ_cost, step * FLAGS.b_per_epoch + i)
             writer.add_summary(summ_acc, step * FLAGS.b_per_epoch + i)
             table = [["Train", train_cost, train_acc], ["Test", loss_test, acc_test]]
             headers = ["Epoch={}".format(step), "Cost", "Accuracy"]
-
             print(tabulate(table, headers, tablefmt='grid'))
+
             # wipe initial_states after testing
             for i, _ in enumerate(initial_states):
                 initial_states[i] = None

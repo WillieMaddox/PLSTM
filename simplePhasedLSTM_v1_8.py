@@ -1,10 +1,11 @@
 from __future__ import division
+from datetime import datetime
 import tensorflow as tf
 import numpy as np
 from tabulate import tabulate
 from tensorflow.contrib.rnn import LSTMStateTuple
 from tensorflow.contrib.rnn import PhasedLSTMCell
-from PhasedLSTMCell_v1 import multiPLSTM
+# from PhasedLSTMCell_v1_8 import PhasedLSTMCell
 
 # Unit test for Phased LSTM
 # Here I implement the first task described in the original paper of PLSTM
@@ -35,20 +36,29 @@ if FLAGS.async:
     tpe = "async"
 else:
     tpe = "sync"
-run_name = '{}_res_{}_hid_{}_exp_{}'.format(tpe, FLAGS.resolution, FLAGS.n_hidden, FLAGS.exp_init)
 
 
-def gen_async_sin(async_sampling, resolution=None, batch_size=32, on_target_T=(5, 6), off_target_T=(1, 100), max_len=125, min_len=85):
+def get_datetime_now(t=None, fmt='%Y_%m%d_%H%M_%S'):
+    """Return timestamp as a string; default: current time, format: YYYY_DDMM_hhmm_ss."""
+    if t is None:
+        t = datetime.now()
+    return t.strftime(fmt)
+
+
+run_name = '{}_{}_res_{}_hid_{}_exp_{}'.format(get_datetime_now(), tpe, FLAGS.resolution, FLAGS.n_hidden, FLAGS.exp_init)
+
+
+def gen_async_sin(async_sampling, resolution=None, batch_size=32, on_target_period=(5, 6), off_target_period=(1, 100), max_len=125, min_len=85):
 
     half_batch = int(batch_size / 2)
-    full_length = off_target_T[1] - on_target_T[1] + on_target_T[0] - off_target_T[0]
+    full_length = off_target_period[1] - on_target_period[1] + on_target_period[0] - off_target_period[0]
 
     # generate random periods
-    posTs = np.random.uniform(on_target_T[0], on_target_T[1], half_batch)
-    size_low = np.floor((on_target_T[0] - off_target_T[0]) * half_batch / full_length).astype('int32')
-    size_high = np.ceil((off_target_T[1] - on_target_T[1]) * half_batch / full_length).astype('int32')
-    low_vec = np.random.uniform(off_target_T[0], on_target_T[0], size_low)
-    high_vec = np.random.uniform(on_target_T[1], off_target_T[1], size_high)
+    posTs = np.random.uniform(on_target_period[0], on_target_period[1], half_batch)
+    size_low = np.floor((on_target_period[0] - off_target_period[0]) * half_batch / full_length).astype('int32')
+    size_high = np.ceil((off_target_period[1] - on_target_period[1]) * half_batch / full_length).astype('int32')
+    low_vec = np.random.uniform(off_target_period[0], on_target_period[0], size_low)
+    high_vec = np.random.uniform(on_target_period[1], off_target_period[1], size_high)
     negTs = np.hstack([low_vec, high_vec])
 
     # generate random lengths
@@ -92,9 +102,17 @@ def gen_async_sin(async_sampling, resolution=None, batch_size=32, on_target_T=(5
 
 
 def RNN(_X, _weights, _biases, lens, initial_states):
-    cell = PhasedLSTMCell(FLAGS.n_hidden, use_peepholes=True, state_is_tuple=True)
 
-    outputs = multiPLSTM([cell] * FLAGS.n_layers, _X, lens, n_input, initial_states)
+    cells = [PhasedLSTMCell(FLAGS.n_hidden, use_peepholes=True) for _ in range(FLAGS.n_layers)]
+
+    # create a RNN cell composed sequentially of a number of RNNCells
+    multi_rnn_cell = tf.nn.rnn_cell.MultiRNNCell(cells)
+
+    # outputs = multiPLSTM(multi_rnn_cell, _X, lens, n_input, initial_states)
+    outputs, state = tf.nn.dynamic_rnn(multi_rnn_cell, _X,
+                                       sequence_length=lens,
+                                       initial_state=tuple(initial_states),
+                                       dtype=tf.float32)
 
     outputs = tf.slice(outputs, [0, 0, 0], [-1, -1, FLAGS.n_hidden])
 
@@ -134,14 +152,18 @@ def main(_):
 
     # Let's define the training and testing operations
     print("Compiling RNN...", )
-    initial_states = [LSTMStateTuple(tf.zeros([FLAGS.batch_size, FLAGS.n_hidden], tf.float32),
-                                     tf.zeros([FLAGS.batch_size, FLAGS.n_hidden], tf.float32)) for _
-                      in range(FLAGS.n_layers)]
+    c0 = tf.zeros([FLAGS.batch_size, FLAGS.n_hidden], tf.float32)
+    h0 = tf.zeros([FLAGS.batch_size, FLAGS.n_hidden], tf.float32)
+    initial_states = [LSTMStateTuple(c0, h0) for _ in range(FLAGS.n_layers)]
+    # initial_states = [LSTMStateTuple(tf.zeros([FLAGS.batch_size, FLAGS.n_hidden], tf.float32),
+    #                                  tf.zeros([FLAGS.batch_size, FLAGS.n_hidden], tf.float32)) for _
+    #                   in range(FLAGS.n_layers)]
+    # initial_state = LSTMStateTuple(c0, h0)
     predictions = RNN(x, weights, biases, lens, initial_states)
     print("DONE!")
 
-    # Register initial_states to be monitored by tensorboard
-    initial_states_hist = tf.summary.histogram("initial_states", initial_states[0][0])
+    # Register initial_state to be monitored by tensorboard
+    initial_state_hist = tf.summary.histogram("initial_states", initial_states)
 
     print("Compiling cost functions...", )
     cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=predictions, labels=y))
@@ -152,7 +174,7 @@ def main(_):
     grads = tf.gradients(cost, tvars)
 
     grads_hist = [tf.summary.histogram("grads_{}".format(i), k) for i, k in enumerate(grads) if k is not None]
-    merged_grads = tf.summary.merge([grads_hist] + [w_out_hist, b_out_hist] + [initial_states_hist])
+    merged_grads = tf.summary.merge([grads_hist] + [w_out_hist, b_out_hist] + [initial_state_hist])
     # merged_grads = tf.summary.merge([grads_hist] + [w_out_hist, b_out_hist])
     cost_summary = tf.summary.scalar("cost", cost)
     cost_val_summary = tf.summary.scalar("cost_val", cost)
@@ -212,6 +234,7 @@ def main(_):
 
             # test accuracy
             # wipe initial_states before testing
+            # initial_state = None
             for i, _ in enumerate(initial_states):
                 initial_states[i] = None
 
@@ -240,6 +263,7 @@ def main(_):
             print(tabulate(table, headers, tablefmt='grid'))
 
             # wipe initial_states after testing
+            # initial_state = None
             for i, _ in enumerate(initial_states):
                 initial_states[i] = None
 
