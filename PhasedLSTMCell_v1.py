@@ -5,24 +5,22 @@ from __future__ import print_function
 import math
 import tensorflow as tf
 from tensorflow.contrib.rnn import LSTMStateTuple, RNNCell
+from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.framework import dtypes
 from tensorflow.python.ops import clip_ops
 from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import nn_ops
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import random_ops
+from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import partitioned_variables
+from tensorflow.python.ops import variable_scope as vs
 from tensorflow.python.ops.math_ops import sigmoid
 from tensorflow.python.ops.math_ops import tanh
-from tensorflow.python.framework import ops
-from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import variable_scope as vs
-from tensorflow.python.platform import tf_logging as logging
-from tensorflow.python.framework import dtypes
-from tensorflow.python.ops import random_ops
 from tensorflow.python.util import nest
 
 
-def random_exp_initializer(minval=0, maxval=None, seed=None,
-                           dtype=dtypes.float32):
+def random_exp_initializer(minval=0, maxval=None, seed=None, dtype=dtypes.float32):
     """Returns an initializer that generates tensors with an exponential distribution.
 
     Args:
@@ -43,16 +41,6 @@ def random_exp_initializer(minval=0, maxval=None, seed=None,
         return tf.exp(random_ops.random_uniform(shape, minval, maxval, dtype, seed=seed))
     
     return _initializer
-
-
-# Here we need to register the gradient for the mod operation
-@ops.RegisterGradient("FloorMod")
-def _mod_grad(op, grad):
-    x, y = op.inputs
-    gz = grad
-    x_grad = gz
-    y_grad = tf.reduce_mean(-(x // y) * gz, axis=[0], keep_dims=True)
-    return x_grad, y_grad
 
 
 def _linear(args, output_size, bias, bias_start=0.0, scope=None):
@@ -84,8 +72,7 @@ def _linear(args, output_size, bias, bias_start=0.0, scope=None):
         if shape.ndims != 2:
             raise ValueError("linear is expecting 2D arguments: %s" % shapes)
         if shape[1].value is None:
-            raise ValueError("linear expects shape[1] to be provided for shape %s, "
-                             "but saw %s" % (shape, shape[1]))
+            raise ValueError("linear expects shape[1] to be provided for shape %s, but saw %s" % (shape, shape[1]))
         else:
             total_arg_size += shape[1].value
     
@@ -94,8 +81,7 @@ def _linear(args, output_size, bias, bias_start=0.0, scope=None):
     # Now the computation.
     scope = vs.get_variable_scope()
     with vs.variable_scope(scope) as outer_scope:
-        weights = vs.get_variable(
-            "weights", [total_arg_size, output_size], dtype=dtype)
+        weights = vs.get_variable("weights", [total_arg_size, output_size], dtype=dtype)
         if len(args) == 1:
             res = math_ops.matmul(args[0], weights)
         else:
@@ -140,6 +126,7 @@ class PhasedLSTMCell(RNNCell):
                  forget_bias=1.0, state_is_tuple=True,
                  activation=tanh, alpha=0.001, r_on_init=0.05, tau_init=6.,
                  manual_set=False, trainable=True, reuse=None):
+
         super(PhasedLSTMCell, self).__init__(_reuse=reuse)
         """Initialize the parameters for an LSTM cell.
     
@@ -169,8 +156,9 @@ class PhasedLSTMCell(RNNCell):
           activation: Activation function of the inner states.
         """
         if not state_is_tuple:
-            logging.warn("%s: Using a concatenated state is slower and will soon be "
-                         "deprecated.  Use state_is_tuple=True.", self)
+            logging.warn(
+                "%s: Using a concatenated state is slower and will soon be "
+                "deprecated.  Use state_is_tuple=True.", self)
         if input_size is not None:
             logging.warn("%s: The input_size parameter is deprecated.", self)
         if num_unit_shards is not None or num_proj_shards is not None:
@@ -254,12 +242,9 @@ class PhasedLSTMCell(RNNCell):
         input_size = inputs.get_shape().with_rank(2)[1]
         if input_size.value is None:
             raise ValueError("Could not infer input size from inputs.get_shape()[-1]")
-        with vs.variable_scope(scope or "lstm_cell",
-                               initializer=self._initializer) as unit_scope:
+        with vs.variable_scope(scope or "lstm_cell", initializer=self._initializer) as unit_scope:
             if self._num_unit_shards is not None:
-                unit_scope.set_partitioner(
-                    partitioned_variables.fixed_size_partitioner(
-                        self._num_unit_shards))
+                unit_scope.set_partitioner(partitioned_variables.fixed_size_partitioner(self._num_unit_shards))
             
             i_size = input_size.value - 1  # -1 to extract time
             times = array_ops.slice(inputs, [0, i_size], [-1, 1])
@@ -272,9 +257,7 @@ class PhasedLSTMCell(RNNCell):
             
             tau = vs.get_variable(
                 "T", shape=[self._num_units],
-                initializer=random_exp_initializer(0,
-                                                   self.tau_init) if not self.manual_set else init_ops.constant_initializer(
-                    self.tau_init),
+                initializer=random_exp_initializer(0, self.tau_init) if not self.manual_set else init_ops.constant_initializer(self.tau_init),
                 trainable=self.trainable, dtype=dtype)
             
             r_on = vs.get_variable(
@@ -284,10 +267,9 @@ class PhasedLSTMCell(RNNCell):
             
             s = vs.get_variable(
                 "S", shape=[self._num_units],
-                initializer=init_ops.random_uniform_initializer(0.,
-                                                                tau.initialized_value()) if not self.manual_set else init_ops.constant_initializer(
-                    0.),
+                initializer=init_ops.random_uniform_initializer(0., tau.initialized_value()) if not self.manual_set else init_ops.constant_initializer(0.),
                 trainable=self.trainable, dtype=dtype)
+
             # for backward compatibility (v < 0.12.0) use the following line instead of the above
             # initializer = init_ops.random_uniform_initializer(0., tau), dtype = dtype)
             
@@ -300,13 +282,11 @@ class PhasedLSTMCell(RNNCell):
             times = tf.tile(times, [1, self._num_units])
             
             # calculate kronos gate
-            phi = tf.div(tf.mod(tf.mod(times - s_broadcast, tau_broadcast) + tau_broadcast, tau_broadcast),
-                         tau_broadcast)
+            phi = tf.div(tf.mod(tf.mod(times - s_broadcast, tau_broadcast) + tau_broadcast, tau_broadcast), tau_broadcast)
             is_up = tf.less(phi, (r_on_broadcast * 0.5))
             is_down = tf.logical_and(tf.less(phi, r_on_broadcast), tf.logical_not(is_up))
             
-            k = tf.where(is_up, phi / (r_on_broadcast * 0.5),
-                         tf.where(is_down, 2. - 2. * (phi / r_on_broadcast), self.alpha * phi))
+            k = tf.where(is_up, phi / (r_on_broadcast * 0.5), tf.where(is_down, 2. - 2. * (phi / r_on_broadcast), self.alpha * phi))
             
             # --------------------------------------- #
             # ------------- PHASED LSTM ------------- #
@@ -314,29 +294,23 @@ class PhasedLSTMCell(RNNCell):
             # --------------------------------------- #
             
             # i = input_gate, j = new_input, f = forget_gate, o = output_gate
-            lstm_matrix = _linear([filtered_inputs, m_prev], 4 * self._num_units, bias=True,
-                                  scope=scope)
-            i, j, f, o = array_ops.split(
-                value=lstm_matrix, num_or_size_splits=4, axis=1)
+            lstm_matrix = _linear([filtered_inputs, m_prev], 4 * self._num_units, bias=True, scope=scope)
+            i, j, f, o = array_ops.split(value=lstm_matrix, num_or_size_splits=4, axis=1)
             
             # Diagonal connections
             if self._use_peepholes:
                 with vs.variable_scope(unit_scope) as projection_scope:
                     if self._num_unit_shards is not None:
                         projection_scope.set_partitioner(None)
-                    w_f_diag = vs.get_variable(
-                        "w_f_diag", shape=[self._num_units], dtype=dtype)
-                    w_i_diag = vs.get_variable(
-                        "w_i_diag", shape=[self._num_units], dtype=dtype)
-                    w_o_diag = vs.get_variable(
-                        "w_o_diag", shape=[self._num_units], dtype=dtype)
+                    w_f_diag = vs.get_variable("w_f_diag", shape=[self._num_units], dtype=dtype)
+                    w_i_diag = vs.get_variable("w_i_diag", shape=[self._num_units], dtype=dtype)
+                    w_o_diag = vs.get_variable("w_o_diag", shape=[self._num_units], dtype=dtype)
             
             if self._use_peepholes:
                 c = (sigmoid(f + self._forget_bias + w_f_diag * c_prev) * c_prev +
                      sigmoid(i + w_i_diag * c_prev) * self._activation(j))
             else:
-                c = (sigmoid(f + self._forget_bias) * c_prev + sigmoid(i) *
-                     self._activation(j))
+                c = (sigmoid(f + self._forget_bias) * c_prev + sigmoid(i) * self._activation(j))
             
             if self._cell_clip is not None:
                 # pylint: disable=invalid-unary-operand-type
@@ -351,9 +325,7 @@ class PhasedLSTMCell(RNNCell):
             if self._num_proj is not None:
                 with vs.variable_scope("projection") as proj_scope:
                     if self._num_proj_shards is not None:
-                        proj_scope.set_partitioner(
-                            partitioned_variables.fixed_size_partitioner(
-                                self._num_proj_shards))
+                        proj_scope.set_partitioner(partitioned_variables.fixed_size_partitioner(self._num_proj_shards))
                     m = _linear(m, self._num_proj, bias=False, scope=scope)
                 
                 if self._proj_clip is not None:
@@ -366,8 +338,7 @@ class PhasedLSTMCell(RNNCell):
             m = k * m + (1. - k) * m_prev
             # END KRONOS GATE
         
-        new_state = (LSTMStateTuple(c, m) if self._state_is_tuple else
-                     array_ops.concat([c, m], 1))
+        new_state = (LSTMStateTuple(c, m) if self._state_is_tuple else array_ops.concat([c, m], 1))
         return m, new_state
 
 
@@ -389,8 +360,12 @@ def multiPLSTM(cells, inputs, lens, n_input, initial_states):
     for k, cell, initial_state in zip(range(len(cells)), cells, initial_states):
         new_x = tf.concat(axis=2, values=[new_x, times])
         with tf.variable_scope("{}".format(k)):
-            outputs, initial_states[k] = tf.nn.dynamic_rnn(cell, new_x, dtype=tf.float32,
-                                                       sequence_length=lens,
-                                                       initial_state=initial_state)
+            outputs, initial_states[k] = tf.nn.dynamic_rnn(
+                cell,
+                new_x,
+                dtype=tf.float32,
+                sequence_length=lens,
+                initial_state=initial_state
+            )
             new_x = outputs
     return new_x

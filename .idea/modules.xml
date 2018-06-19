@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/Phased LSTM.iml" filepath="$PROJECT_DIR$/.idea/Phased LSTM.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/PLSTM.iml" filepath="$PROJECT_DIR$/.idea/PLSTM.iml" />
     </modules>
   </component>
 </project>
