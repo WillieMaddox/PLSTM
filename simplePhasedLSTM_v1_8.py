@@ -4,8 +4,8 @@ import tensorflow as tf
 import numpy as np
 from tabulate import tabulate
 from tensorflow.contrib.rnn import LSTMStateTuple
-from tensorflow.contrib.rnn import PhasedLSTMCell
-# from PhasedLSTMCell_v1_8 import PhasedLSTMCell
+# from tensorflow.contrib.rnn import PhasedLSTMCell
+from PhasedLSTMCell_v1_8 import PhasedLSTMCell
 
 # Unit test for Phased LSTM
 # Here I implement the first task described in the original paper of PLSTM
@@ -19,11 +19,11 @@ flags.DEFINE_integer("n_hidden", 100, "hidden units in the recurrent layer")
 flags.DEFINE_integer("n_epochs", 30, "number of epochs")
 flags.DEFINE_integer("batch_size", 32, "batch size")
 flags.DEFINE_integer("b_per_epoch", 80, "batches per epoch")
-flags.DEFINE_integer("n_layers", 1, "hidden units in the recurrent layer")
-flags.DEFINE_integer("max_length", 125, "max length of sin waves")
-flags.DEFINE_integer("min_length", 50, "min length of sine waves")
-flags.DEFINE_float("min_f_on", 5, "min frequency for the on set")
-flags.DEFINE_float("max_f_on", 6, "max frequency for the on set")
+flags.DEFINE_integer("n_layers", 2, "hidden units in the recurrent layer")
+flags.DEFINE_integer("max_length", 200, "max length of sin waves")
+flags.DEFINE_integer("min_length", 150, "min length of sine waves")
+flags.DEFINE_float("min_f_on", 35, "min frequency for the on set")
+flags.DEFINE_float("max_f_on", 65, "max frequency for the on set")
 flags.DEFINE_float("min_f_off", 1, "min frequency for the off set")
 flags.DEFINE_float("max_f_off", 100, "max frequency for the off set")
 flags.DEFINE_float("exp_init", 3., "Value for initialization of Tau")
@@ -32,10 +32,7 @@ FLAGS = flags.FLAGS
 # Net Params
 n_input = 1
 n_out = 2
-if FLAGS.async:
-    tpe = "async"
-else:
-    tpe = "sync"
+tpe = "async" if FLAGS.async else "sync"
 
 
 def get_datetime_now(t=None, fmt='%Y_%m%d_%H%M_%S'):
@@ -98,7 +95,7 @@ def gen_async_sin(async_sampling, resolution=None, batch_size=32, on_target_peri
 
     x = np.squeeze(np.stack([x, t], 2))
 
-    return x, y, samples, posTs, negTs
+    return x, y, samples
 
 
 def RNN(_X, _weights, _biases, lens, initial_states):
@@ -108,7 +105,6 @@ def RNN(_X, _weights, _biases, lens, initial_states):
     # create a RNN cell composed sequentially of a number of RNNCells
     multi_rnn_cell = tf.nn.rnn_cell.MultiRNNCell(cells)
 
-    # outputs = multiPLSTM(multi_rnn_cell, _X, lens, n_input, initial_states)
     outputs, state = tf.nn.dynamic_rnn(multi_rnn_cell, _X,
                                        sequence_length=lens,
                                        initial_state=tuple(initial_states),
@@ -154,11 +150,11 @@ def main(_):
     print("Compiling RNN...", )
     c0 = tf.zeros([FLAGS.batch_size, FLAGS.n_hidden], tf.float32)
     h0 = tf.zeros([FLAGS.batch_size, FLAGS.n_hidden], tf.float32)
-    initial_states = [LSTMStateTuple(c0, h0) for _ in range(FLAGS.n_layers)]
+    initial_states = [LSTMStateTuple(c0, h0)] * FLAGS.n_layers
+    # initial_states = [LSTMStateTuple(c0, h0) for _ in range(FLAGS.n_layers)]
     # initial_states = [LSTMStateTuple(tf.zeros([FLAGS.batch_size, FLAGS.n_hidden], tf.float32),
     #                                  tf.zeros([FLAGS.batch_size, FLAGS.n_hidden], tf.float32)) for _
     #                   in range(FLAGS.n_layers)]
-    # initial_state = LSTMStateTuple(c0, h0)
     predictions = RNN(x, weights, biases, lens, initial_states)
     print("DONE!")
 
@@ -208,7 +204,8 @@ def main(_):
             train_cost = 0
             train_acc = 0
             for i in range(FLAGS.b_per_epoch):
-                batch_xs, batch_ys, leng, posT, negT = gen_async_sin(
+
+                batch_xs, batch_ys, leng = gen_async_sin(
                     FLAGS.async,
                     FLAGS.resolution,
                     FLAGS.batch_size,
@@ -234,11 +231,10 @@ def main(_):
 
             # test accuracy
             # wipe initial_states before testing
-            # initial_state = None
             for i, _ in enumerate(initial_states):
                 initial_states[i] = None
 
-            test_xs, test_ys, leng, _, _ = gen_async_sin(
+            test_xs, test_ys, leng = gen_async_sin(
                 FLAGS.async,
                 FLAGS.resolution,
                 FLAGS.batch_size,
@@ -263,7 +259,6 @@ def main(_):
             print(tabulate(table, headers, tablefmt='grid'))
 
             # wipe initial_states after testing
-            # initial_state = None
             for i, _ in enumerate(initial_states):
                 initial_states[i] = None
 
